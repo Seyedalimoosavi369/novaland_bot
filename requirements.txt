@@ -1,0 +1,5 @@
+flask
+flask-cors
+python-telegram-bot==21.7
+aiohttp
+gunicorn
