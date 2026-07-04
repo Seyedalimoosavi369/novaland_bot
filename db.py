@@ -1,4 +1,4 @@
-import sqlite3, os, random, string
+import sqlite3, os, random, string, json
 
 DB_PATH = os.environ.get("DB_PATH", "/tmp/novaland.db")
 ADMIN_ID = os.environ.get("ADMIN_ID", "8030373785")
@@ -45,6 +45,9 @@ def init_db():
         visits INTEGER DEFAULT 0,
         income REAL DEFAULT 0,
         is_admin INTEGER DEFAULT 0,
+        decorations TEXT DEFAULT '[]',
+        bg_color TEXT DEFAULT '#001200',
+        theme TEXT DEFAULT 'default',
         purchased_at TIMESTAMP DEFAULT NULL,
         UNIQUE(x, y))""")
     c.execute("""CREATE TABLE IF NOT EXISTS transactions (
@@ -61,6 +64,18 @@ def init_db():
         telegram_id TEXT UNIQUE NOT NULL,
         land_x INTEGER, land_y INTEGER,
         claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS offers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        land_x INTEGER NOT NULL, land_y INTEGER NOT NULL,
+        from_user TEXT NOT NULL, to_user TEXT NOT NULL,
+        amount REAL NOT NULL,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        responded_at TIMESTAMP DEFAULT NULL)""")
+    # migration for older DBs that already exist without new columns
+    for col, definition in [("decorations","TEXT DEFAULT '[]'"),("bg_color","TEXT DEFAULT '#001200'"),("theme","TEXT DEFAULT 'default'")]:
+        try: c.execute(f"ALTER TABLE lands ADD COLUMN {col} {definition}")
+        except: pass
     for x in range(50):
         for y in range(50):
             dist = max(abs(x-24), abs(y-24))
@@ -122,7 +137,7 @@ def get_user_lands(tid):
 
 def get_map_data():
     conn=get_db()
-    ls=conn.execute("SELECT x,y,owner_id,price,zone,is_for_sale,sale_price,is_for_rent,rent_price,building,effect,image_url,land_name,visits,income,is_admin FROM lands").fetchall()
+    ls=conn.execute("SELECT x,y,owner_id,price,zone,is_for_sale,sale_price,is_for_rent,rent_price,building,effect,image_url,land_name,visits,income,is_admin,bg_color,theme FROM lands").fetchall()
     conn.close(); return [dict(l) for l in ls]
 
 def buy_land(x,y,tid,tx=""):
@@ -158,6 +173,27 @@ def update_land(x,y,tid,**kw):
         if k in ok: sets.append(f"{k}=?"); vals.append(v)
     if sets: vals+=[x,y,str(tid)]; conn.execute(f"UPDATE lands SET {','.join(sets)} WHERE x=? AND y=? AND owner_id=?",vals); conn.commit()
     conn.close()
+
+def save_decorations(x,y,tid,decorations,bg_color=None,theme=None):
+    """decorations: list of dicts like {type,icon,px,py,rot,scale} -> stored as JSON"""
+    conn=get_db()
+    l=conn.execute("SELECT owner_id FROM lands WHERE x=? AND y=?",(x,y)).fetchone()
+    if not l or l['owner_id']!=str(tid): conn.close(); return False,"این زمین مال تو نیست"
+    dec_json=json.dumps(decorations, ensure_ascii=False)
+    sets=["decorations=?"]; vals=[dec_json]
+    if bg_color: sets.append("bg_color=?"); vals.append(bg_color)
+    if theme: sets.append("theme=?"); vals.append(theme)
+    vals+=[x,y,str(tid)]
+    conn.execute(f"UPDATE lands SET {','.join(sets)} WHERE x=? AND y=? AND owner_id=?",vals)
+    conn.commit(); conn.close(); return True,"✅ ذخیره شد"
+
+def get_land_full(x,y):
+    conn=get_db(); l=conn.execute("SELECT * FROM lands WHERE x=? AND y=?",(x,y)).fetchone(); conn.close()
+    if not l: return None
+    d=dict(l)
+    try: d['decorations']=json.loads(d.get('decorations') or '[]')
+    except: d['decorations']=[]
+    return d
 
 def visit_land(x,y,tid):
     conn=get_db()
@@ -215,3 +251,51 @@ def get_market():
     s=conn.execute("SELECT l.*,u.username,u.first_name FROM lands l LEFT JOIN users u ON u.telegram_id=l.owner_id WHERE l.is_for_sale=1 ORDER BY l.sale_price ASC LIMIT 20").fetchall()
     r=conn.execute("SELECT l.*,u.username,u.first_name FROM lands l LEFT JOIN users u ON u.telegram_id=l.owner_id WHERE l.is_for_rent=1 ORDER BY l.rent_price ASC LIMIT 20").fetchall()
     conn.close(); return [dict(x) for x in s],[dict(x) for x in r]
+
+# ---------- Offers (پیشنهاد قیمت) ----------
+
+def make_offer(x,y,from_tid,amount):
+    conn=get_db()
+    l=conn.execute("SELECT * FROM lands WHERE x=? AND y=?",(x,y)).fetchone()
+    if not l: conn.close(); return False,"زمین پیدا نشد"
+    if not l['owner_id']: conn.close(); return False,"این زمین صاحب نداره، مستقیم بخرش"
+    if l['owner_id']==str(from_tid): conn.close(); return False,"این زمین خودته"
+    if l['is_admin']: conn.close(); return False,"زمین ادمینه"
+    existing=conn.execute("SELECT id FROM offers WHERE land_x=? AND land_y=? AND from_user=? AND status='pending'",(x,y,str(from_tid))).fetchone()
+    if existing:
+        conn.execute("UPDATE offers SET amount=?,created_at=CURRENT_TIMESTAMP WHERE id=?",(amount,existing['id']))
+    else:
+        conn.execute("INSERT INTO offers (land_x,land_y,from_user,to_user,amount) VALUES (?,?,?,?,?)",(x,y,str(from_tid),l['owner_id'],amount))
+    conn.commit(); conn.close(); return True,"✅ پیشنهادت ثبت شد"
+
+def get_land_offers(x,y,owner_tid):
+    conn=get_db()
+    rows=conn.execute("""SELECT o.*,u.first_name,u.username FROM offers o LEFT JOIN users u ON u.telegram_id=o.from_user
+        WHERE o.land_x=? AND o.land_y=? AND o.to_user=? AND o.status='pending' ORDER BY o.amount DESC""",(x,y,str(owner_tid))).fetchall()
+    conn.close(); return [dict(r) for r in rows]
+
+def get_my_offers(tid):
+    conn=get_db()
+    sent=conn.execute("SELECT * FROM offers WHERE from_user=? ORDER BY created_at DESC LIMIT 30",(str(tid),)).fetchall()
+    received=conn.execute("SELECT * FROM offers WHERE to_user=? AND status='pending' ORDER BY amount DESC LIMIT 30",(str(tid),)).fetchall()
+    conn.close(); return [dict(r) for r in sent],[dict(r) for r in received]
+
+def respond_offer(offer_id,tid,action):
+    conn=get_db()
+    o=conn.execute("SELECT * FROM offers WHERE id=?",(offer_id,)).fetchone()
+    if not o: conn.close(); return False,"پیشنهاد پیدا نشد"
+    if o['to_user']!=str(tid): conn.close(); return False,"این پیشنهاد مال تو نیست"
+    if o['status']!='pending': conn.close(); return False,"قبلاً پاسخ داده شده"
+    if action=='reject':
+        conn.execute("UPDATE offers SET status='rejected',responded_at=CURRENT_TIMESTAMP WHERE id=?",(offer_id,))
+        conn.commit(); conn.close(); return True,"❌ پیشنهاد رد شد"
+    if action=='accept':
+        amt=o['amount']; comm=round(amt*COMMISSION,4); seller_gets=round(amt-comm,4)
+        add_balance(o['to_user'],seller_gets,conn)
+        conn.execute("UPDATE lands SET owner_id=?,is_for_sale=0,sale_price=0,purchased_at=CURRENT_TIMESTAMP WHERE x=? AND y=?",(o['from_user'],o['land_x'],o['land_y']))
+        conn.execute("INSERT INTO transactions (type,land_x,land_y,from_user,to_user,amount,commission,note) VALUES ('offer',?,?,?,?,?,?,'پیشنهاد قبول شد')",(o['land_x'],o['land_y'],o['to_user'],o['from_user'],amt,comm))
+        conn.execute("UPDATE offers SET status='accepted',responded_at=CURRENT_TIMESTAMP WHERE id=?",(offer_id,))
+        conn.execute("UPDATE offers SET status='rejected',responded_at=CURRENT_TIMESTAMP WHERE land_x=? AND land_y=? AND id!=? AND status='pending'",(o['land_x'],o['land_y'],offer_id))
+        add_xp(o['from_user'],30,conn)
+        conn.commit(); conn.close(); return True,"✅ پیشنهاد قبول شد، زمین منتقل شد"
+    conn.close(); return False,"دستور نامعتبر"
