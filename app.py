@@ -49,9 +49,18 @@ def map_data():
 
 @app.route("/api/land/<int:x>/<int:y>")
 def land_info(x,y):
-    l=get_land(x,y)
+    l=get_land_full(x,y)
     if not l: return jsonify({"error":"Not found"}),404
-    return jsonify(dict(l))
+    return jsonify(l)
+
+@app.route("/api/land/<int:x>/<int:y>/offers")
+def land_offers_route(x,y):
+    u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u={"id":request.args.get("id",0)}
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    l=get_land(x,y)
+    if not l or l['owner_id']!=str(u["id"]): return jsonify({"error":"Forbidden"}),403
+    return jsonify({"offers":get_land_offers(x,y,u["id"])})
 
 @app.route("/api/buy",methods=["POST"])
 def buy():
@@ -93,6 +102,40 @@ def land_upd():
     kw={k:data[k] for k in ["building","effect","image_url","land_name","land_desc"] if k in data}
     update_land(data.get("x"),data.get("y"),str(u["id"]),**kw)
     return jsonify({"success":True})
+
+@app.route("/api/land/decorations",methods=["POST"])
+def land_dec():
+    """Save decorations placed on a land: trees, flower pots, water, stickers, photo, bg color, theme"""
+    data=request.json or {}; u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u=dev(data)
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    decorations=data.get("decorations",[])
+    ok,msg=save_decorations(data.get("x"),data.get("y"),str(u["id"]),decorations,data.get("bg_color"),data.get("theme"))
+    return jsonify({"success":ok,"message":msg}) if ok else (jsonify({"error":msg}),400)
+
+@app.route("/api/offer",methods=["POST"])
+def offer_route():
+    data=request.json or {}; u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u=dev(data)
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    ok,msg=make_offer(data.get("x"),data.get("y"),str(u["id"]),float(data.get("amount",0)))
+    return jsonify({"success":ok,"message":msg}) if ok else (jsonify({"error":msg}),400)
+
+@app.route("/api/offer/respond",methods=["POST"])
+def offer_respond_route():
+    data=request.json or {}; u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u=dev(data)
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    ok,msg=respond_offer(data.get("offer_id"),str(u["id"]),data.get("action"))
+    return jsonify({"success":ok,"message":msg}) if ok else (jsonify({"error":msg}),400)
+
+@app.route("/api/offers/mine")
+def offers_mine_route():
+    u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u={"id":request.args.get("id",0)}
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    sent,received=get_my_offers(u["id"])
+    return jsonify({"sent":sent,"received":received})
 
 @app.route("/api/visit",methods=["POST"])
 def visit():
