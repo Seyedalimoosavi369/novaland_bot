@@ -175,7 +175,7 @@ def update_land(x,y,tid,**kw):
     conn.close()
 
 def save_decorations(x,y,tid,decorations,bg_color=None,theme=None):
-    """decorations: list of dicts like {type,icon,px,py,rot,scale} -> stored as JSON"""
+    """decorations: list of dicts like {type,x,z,rot} -> stored as JSON (position updates / removals, no new paid items)"""
     conn=get_db()
     l=conn.execute("SELECT owner_id FROM lands WHERE x=? AND y=?",(x,y)).fetchone()
     if not l or l['owner_id']!=str(tid): conn.close(); return False,"این زمین مال تو نیست"
@@ -186,6 +186,40 @@ def save_decorations(x,y,tid,decorations,bg_color=None,theme=None):
     vals+=[x,y,str(tid)]
     conn.execute(f"UPDATE lands SET {','.join(sets)} WHERE x=? AND y=? AND owner_id=?",vals)
     conn.commit(); conn.close(); return True,"✅ ذخیره شد"
+
+ITEM_CATALOG = {
+    "tree":      {"name":"درخت",      "price":0.03},
+    "bush":      {"name":"بوته",      "price":0.02},
+    "fence":     {"name":"حصار",      "price":0.02},
+    "lamp":      {"name":"چراغ",      "price":0.03},
+    "well":      {"name":"چاه آب",    "price":0.06},
+    "pond":      {"name":"استخر",     "price":0.10},
+    "wall":      {"name":"دیوار",     "price":0.02},
+    "house_small":{"name":"خانه کوچک","price":0.40},
+    "house_big": {"name":"خانه بزرگ", "price":0.90},
+    "tower":     {"name":"برج",       "price":0.70},
+    "shop_bldg": {"name":"مغازه",     "price":0.60},
+    "flower":    {"name":"باغچه گل",  "price":0.02},
+}
+
+def buy_item(x,y,tid,item_type):
+    if item_type not in ITEM_CATALOG: return False,"آیتم نامعتبر",None
+    price=ITEM_CATALOG[item_type]["price"]
+    conn=get_db()
+    l=conn.execute("SELECT * FROM lands WHERE x=? AND y=?",(x,y)).fetchone()
+    if not l or l['owner_id']!=str(tid): conn.close(); return False,"این زمین مال تو نیست",None
+    u=conn.execute("SELECT ton_balance FROM users WHERE telegram_id=?",(str(tid),)).fetchone()
+    if not u or u['ton_balance']<price: conn.close(); return False,"موجودی TON کافی نیست",None
+    try: decs=json.loads(l['decorations'] or '[]')
+    except: decs=[]
+    import random as _r
+    new_item={"type":item_type,"x":round(_r.uniform(-3,3),2),"z":round(_r.uniform(-3,3),2),"rot":0}
+    decs.append(new_item)
+    conn.execute("UPDATE users SET ton_balance=ton_balance-? WHERE telegram_id=?",(price,str(tid)))
+    conn.execute("UPDATE lands SET decorations=? WHERE x=? AND y=?",(json.dumps(decs,ensure_ascii=False),x,y))
+    conn.execute("INSERT INTO transactions (type,land_x,land_y,from_user,amount,note) VALUES ('shop_item',?,?,?,?,?)",(x,y,str(tid),price,item_type))
+    conn.commit(); conn.close()
+    return True,"✅ خریداری شد",decs
 
 def get_land_full(x,y):
     conn=get_db(); l=conn.execute("SELECT * FROM lands WHERE x=? AND y=?",(x,y)).fetchone(); conn.close()
