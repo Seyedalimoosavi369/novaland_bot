@@ -113,6 +113,19 @@ def land_dec():
     ok,msg=save_decorations(data.get("x"),data.get("y"),str(u["id"]),decorations,data.get("bg_color"),data.get("theme"))
     return jsonify({"success":ok,"message":msg}) if ok else (jsonify({"error":msg}),400)
 
+@app.route("/api/shop/catalog")
+def shop_catalog():
+    return jsonify({"items":ITEM_CATALOG})
+
+@app.route("/api/land/buy_item",methods=["POST"])
+def land_buy_item():
+    data=request.json or {}; u=tg(request)
+    if not u and os.environ.get("DEV_MODE"): u=dev(data)
+    if not u: return jsonify({"error":"Unauthorized"}),401
+    ok,msg,decs=buy_item(data.get("x"),data.get("y"),str(u["id"]),data.get("item_type"))
+    if not ok: return jsonify({"error":msg}),400
+    return jsonify({"success":True,"message":msg,"decorations":decs})
+
 @app.route("/api/offer",methods=["POST"])
 def offer_route():
     data=request.json or {}; u=tg(request)
